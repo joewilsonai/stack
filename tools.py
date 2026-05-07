@@ -644,13 +644,15 @@ TOOL_SCHEMAS = [
             "'quiet' = only respond when directly addressed, no proactive interjections. "
             "'pair' = default; interject on meaningful watcher events. "
             "'roast' = active push-back on rabbit holes, more opinionated. "
-            "Use when the developer says 'go quiet' / 'switch to pair' / 'roast me' / 'pair mode'. "
+            "'company' = ambient presence; casual periodic check-ins, no work-talk unless asked. "
+            "Use when the developer says 'go quiet' / 'pair mode' / 'roast me' / "
+            "'keep me company' / 'company mode' / 'hang out'. "
             "Pass empty string to just report the current mode."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "mode": {"type": "string", "description": "quiet | pair | roast | (empty for current)"},
+                "mode": {"type": "string", "description": "quiet | pair | roast | company | (empty for current)"},
             },
         },
     },

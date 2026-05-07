@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path
 
-VALID_MODES = ("quiet", "pair", "roast")
+VALID_MODES = ("quiet", "pair", "roast", "company")
 
 _current_mode = os.environ.get("STACK_MODE", "pair").strip().lower()
 if _current_mode not in VALID_MODES:

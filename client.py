@@ -256,6 +256,13 @@ class Stack:
         self.watcher = Watcher()
         print(self.watcher.status(), flush=True)
 
+        # Companion idle tracking — used by company mode to fire periodic
+        # casual check-ins when the developer has been silent.
+        self.last_activity_ms = time.monotonic() * 1000
+        self.idle_check_interval_sec = 60   # how often we check
+        self.idle_threshold_sec = int(os.environ.get("STACK_COMPANY_IDLE_SEC", "900"))  # 15 min default
+        self.last_idle_checkin_ms = 0.0     # so we don't spam on consecutive ticks
+
         # Pet subprocess (mode is managed in state.py from STACK_MODE env)
         self.pet_process: subprocess.Popen | None = None
         if PET_ENABLED:
@@ -431,6 +438,7 @@ class Stack:
                 self.assistant_buf = []
                 if full:
                     self.assistant_turns += 1
+                    self.last_activity_ms = time.monotonic() * 1000
                     self._write_session({"event": "stack", "text": full})
 
             elif t == "conversation.item.input_audio_transcription.completed":
@@ -438,6 +446,7 @@ class Stack:
                 if txt:
                     print(f"\n[user] {txt}", flush=True)
                     self.user_turns += 1
+                    self.last_activity_ms = time.monotonic() * 1000
                     if self.first_user_turn is None:
                         self.first_user_turn = txt
                     self._write_session({"event": "user", "text": txt})
@@ -542,22 +551,24 @@ class Stack:
             print(f"\n[observe] {category}/{severity} :: {summary}", flush=True)
             self._write_session({"event": "observation", "label": label, "raw_preview": obs[:500]})
 
-            # Pet reaction (independent of whether we inject)
-            pet_react = PET_REACTION.get(category)
-            if pet_react:
-                asyncio.create_task(self._flash_pet_state(pet_react, hold_sec=4.0))
+            mode = stack_state.get_mode()
+
+            # Pet reaction — skip in company mode (pet stays chill, no alarms)
+            if mode != "company":
+                pet_react = PET_REACTION.get(category)
+                if pet_react:
+                    asyncio.create_task(self._flash_pet_state(pet_react, hold_sec=4.0))
 
             # Mode-aware injection policy
-            mode = stack_state.get_mode()
             should_inject = noteworthy and (
                 (mode == "pair") or
                 (mode == "roast") or
-                (mode == "quiet" and severity == "high")
+                (mode == "quiet" and severity == "high") or
+                (mode == "company" and severity == "high")
             )
             if not should_inject:
                 continue
 
-            # Build the system message — give the model the summary first, raw diff second
             mode_suffix = ""
             if mode == "roast":
                 mode_suffix = (
@@ -567,6 +578,12 @@ class Stack:
             elif mode == "quiet":
                 mode_suffix = (
                     " You are in QUIET mode. Only speak because severity is high. Keep it to one short sentence."
+                )
+            elif mode == "company":
+                mode_suffix = (
+                    " You are in COMPANY mode. The developer didn't ask you to debug. Mention what "
+                    "you noticed warmly and briefly, like a friend at the desk — not an assistant. "
+                    "One short sentence. No detailed analysis unless asked."
                 )
             try:
                 await self.send({
@@ -598,6 +615,52 @@ class Stack:
             except Exception as e:
                 print(f"[observe] inject error: {e}", flush=True)
 
+    async def idle_companion_loop(self):
+        """In company mode, fire a casual ambient check-in if the developer
+        has been silent for STACK_COMPANY_IDLE_SEC (default 900s = 15min).
+        Inactive in any other mode."""
+        while not self.shutdown.is_set():
+            await asyncio.sleep(self.idle_check_interval_sec)
+            if stack_state.get_mode() != "company":
+                continue
+            now_ms = time.monotonic() * 1000
+            silence_sec = (now_ms - self.last_activity_ms) / 1000
+            since_last_checkin_sec = (now_ms - self.last_idle_checkin_ms) / 1000
+            # Only fire if quiet for >= threshold AND we haven't already
+            # checked in within the threshold window
+            if silence_sec < self.idle_threshold_sec:
+                continue
+            if since_last_checkin_sec < self.idle_threshold_sec:
+                continue
+            if self.response_active:
+                continue  # don't talk over an in-flight response
+            self.last_idle_checkin_ms = now_ms
+            silence_min = int(silence_sec / 60)
+            print(f"\n[idle] {silence_min}min silent — company check-in", flush=True)
+            try:
+                await self.send({
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{
+                            "type": "input_text",
+                            "text": (
+                                f"[idle check-in — {silence_min} minutes of silence in company mode]\n"
+                                "Drop a short, casual ambient line. Like a friend at the desk who's been "
+                                "sitting quietly with you and just looks up. NOT an assistant asking how to "
+                                "help. NOT work-talk. One sentence, warm, low-key. Vary it — sometimes a "
+                                "tiny observation, sometimes a soft 'still here', sometimes just nothing at "
+                                "all if it would feel forced."
+                            ),
+                        }],
+                    },
+                })
+                if not self.response_active:
+                    await self.send({"type": "response.create"})
+            except Exception as e:
+                print(f"[idle] inject error: {e}", flush=True)
+
     async def run(self):
         await self.connect()
         await asyncio.gather(
@@ -606,6 +669,7 @@ class Stack:
             self.event_loop(),
             self.watcher.loop(),
             self.watch_consume_loop(),
+            self.idle_companion_loop(),
             return_exceptions=False,
         )
 
