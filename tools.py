@@ -290,6 +290,63 @@ def list_dir(path: str = ".") -> str:
     return "\n".join(lines)
 
 
+_FIND_SKIP_DIRS = {
+    ".git", ".venv", "venv", "node_modules", "__pycache__",
+    ".next", ".turbo", "dist", "build", ".cache", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", "target", ".gradle",
+}
+
+
+def find_in_repo(name: str, max_results: int = 30) -> str:
+    """Search the project tree for files/directories matching a name.
+    Case-insensitive substring match. Honors the same deny list as read_file
+    by pruning denied subtrees during traversal."""
+    if not name:
+        return "[find_in_repo: empty name]"
+    name_low = name.lower()
+    matches: list[str] = []
+
+    for root, dirs, files in os.walk(CWD_ROOT):
+        # Prune noisy dirs + dotdirs
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _FIND_SKIP_DIRS]
+        # Prune denied subtrees
+        root_path = Path(root)
+        ok, _ = _path_allowed(root_path)
+        if not ok:
+            dirs[:] = []
+            continue
+        # Match dirs (also yields walking into them; we add the dir entry itself)
+        for d in dirs:
+            if name_low in d.lower():
+                rel = (root_path / d).resolve()
+                try:
+                    matches.append(str(rel.relative_to(CWD_ROOT)) + "/")
+                except ValueError:
+                    matches.append(str(rel) + "/")
+                if len(matches) >= max_results:
+                    break
+        if len(matches) >= max_results:
+            break
+        # Match files
+        for f in files:
+            if f.startswith("."):
+                continue
+            if name_low in f.lower():
+                rel = (root_path / f).resolve()
+                try:
+                    matches.append(str(rel.relative_to(CWD_ROOT)))
+                except ValueError:
+                    matches.append(str(rel))
+                if len(matches) >= max_results:
+                    break
+        if len(matches) >= max_results:
+            break
+
+    if not matches:
+        return f"[find_in_repo: no matches for '{name}']"
+    return f"=== matches for '{name}' ({len(matches)}) ===\n" + "\n".join(f"  {m}" for m in matches)
+
+
 def _humanize_size(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024:
@@ -444,6 +501,24 @@ TOOL_SCHEMAS = [
     },
     {
         "type": "function",
+        "name": "find_in_repo",
+        "description": (
+            "Search the project tree for files or directories whose name contains "
+            "a substring (case-insensitive). Use this when the developer asks "
+            "'do you see X' / 'is X in the repo' / 'where is the X file' / "
+            "'find me X'. Always try this BEFORE saying you can't find something."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name or substring to search for"},
+                "max_results": {"type": "integer", "default": 30},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "type": "function",
         "name": "list_dir",
         "description": (
             "List entries in a directory of the project tree. Use this to explore "
@@ -514,6 +589,7 @@ TOOL_SCHEMAS = [
 DISPATCH = {
     "read_file": lambda args: read_file(args.get("path", "")),
     "list_dir": lambda args: list_dir(args.get("path", ".")),
+    "find_in_repo": lambda args: find_in_repo(args.get("name", ""), args.get("max_results", 30)),
     "web_search_quick": lambda args: web_search_quick(args.get("query", "")),
     "web_search_deep": lambda args: web_search_deep(args.get("query", "")),
     "tmux_pane": lambda args: tmux_pane(args.get("name", "")),
