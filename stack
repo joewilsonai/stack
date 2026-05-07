@@ -13,7 +13,17 @@
 #   STACK_PET=0          disable pet
 set -e
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Resolve symlinks so SCRIPT_DIR points at the real repo, not ~/.local/bin
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *)  SOURCE="$DIR/$TARGET" ;;
+  esac
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 
 # Pass-through "here" / "--no-split" — just run in this pane
 case "${1:-}" in
@@ -57,8 +67,8 @@ if [ -n "$CMUX_WORKSPACE_ID" ]; then
     exit 1
   fi
 
-  # Give the new pane a beat to be ready for input
-  sleep 0.4
+  # Give the new pane time to fully initialize its shell + load profile
+  sleep 1.2
 
   # Pass extra args to run.sh by quoting them into a single shell-safe string
   EXTRA=""
@@ -66,7 +76,9 @@ if [ -n "$CMUX_WORKSPACE_ID" ]; then
     EXTRA="$EXTRA $(printf '%q' "$a")"
   done
 
-  CMD="STACK_WATCH_PANE=$ORIGIN exec $SCRIPT_DIR/run.sh$EXTRA"
+  # No `exec` — if run.sh exits for any reason (auth fail, port conflict),
+  # the shell stays so you can see the error instead of the pane closing.
+  CMD="STACK_WATCH_PANE=$ORIGIN $SCRIPT_DIR/run.sh$EXTRA"
   "$CMUX_BIN" send --surface "$NEW" "$CMD"$'\n'
 
   echo "[stack] launched in $NEW (watching $ORIGIN)"
