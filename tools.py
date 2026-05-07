@@ -215,19 +215,119 @@ def tmux_pane(name: str = "") -> str:
 
 
 def git_status() -> str:
-    return _not_implemented("git_status")
+    ok, out = _git(["status", "-sb"])
+    if not ok:
+        return out
+    return out or "[clean working tree]"
 
 
 def git_diff(staged: bool = False) -> str:
-    return _not_implemented("git_diff")
+    args = ["diff", "--no-textconv", "--no-ext-diff", "--stat"]
+    if staged:
+        args.append("--cached")
+    ok, out = _git(args, timeout=15)
+    if not ok:
+        return out
+    if not out:
+        return "[no diff]"
+    if len(out) > 6000:
+        return out[:6000] + "\n[truncated]"
+    return out
 
 
 def git_log(limit: int = 10) -> str:
-    return _not_implemented("git_log")
+    limit = max(1, min(limit, 50))
+    ok, out = _git([
+        "log", f"-{limit}", "--no-textconv",
+        "--pretty=format:%h  %ad  %s  (%an)",
+        "--date=short",
+    ])
+    if not ok:
+        return out
+    return out or "[no commits]"
 
 
 def run_readonly(cmd: str) -> str:
     return _not_implemented("run_readonly")
+
+
+def list_dir(path: str = ".") -> str:
+    """List entries in a directory. Scoped to the same allowlist as read_file —
+    refuses denied paths. Useful for Stack to explore the project tree."""
+    p = _expand(path)
+    if not p.is_absolute():
+        p = (CWD_ROOT / p).resolve()
+    ok, reason = _path_allowed(p)
+    if not ok:
+        return f"[refused: {reason}]"
+    if not p.exists():
+        return f"[not found: {p}]"
+    if not p.is_dir():
+        return f"[not a directory: {p}]"
+    try:
+        items = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+    except PermissionError:
+        return f"[permission denied: {p}]"
+    if not items:
+        return f"=== {p} ===\n(empty)"
+    lines = [f"=== {p} ==="]
+    for item in items[:300]:
+        name = item.name
+        if name.startswith(".") and name not in (".env.example", ".gitignore"):
+            continue  # hide dotfiles by default
+        if item.is_symlink():
+            lines.append(f"  {name}@ -> {os.readlink(item)}")
+        elif item.is_dir():
+            lines.append(f"  {name}/")
+        else:
+            try:
+                sz = item.stat().st_size
+                lines.append(f"  {name}  ({_humanize_size(sz)})")
+            except OSError:
+                lines.append(f"  {name}")
+    if len(items) > 300:
+        lines.append(f"  … {len(items) - 300} more")
+    return "\n".join(lines)
+
+
+def _humanize_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
+def _git(args: list[str], timeout: int = 10) -> tuple[bool, str]:
+    """Run a hardened git command in CWD_ROOT. Returns (ok, output)."""
+    env = os.environ.copy()
+    env.update({
+        "GIT_PAGER": "cat",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+    })
+    env.pop("GIT_EXTERNAL_DIFF", None)
+    cmd = [
+        "git", "--no-pager",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "diff.external=",
+        "-c", "protocol.version=2",
+    ] + args
+    try:
+        out = subprocess.run(
+            cmd, cwd=str(CWD_ROOT), env=env,
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"[git timeout after {timeout}s]"
+    except FileNotFoundError:
+        return False, "[git not installed]"
+    except Exception as e:
+        return False, f"[git error: {e}]"
+    if out.returncode != 0:
+        return False, f"[git exit {out.returncode}]\n{out.stderr.strip()[:1000]}"
+    return True, out.stdout.strip()
 
 
 def send_to_pane(text: str, name: str = "") -> str:
@@ -344,14 +444,29 @@ TOOL_SCHEMAS = [
     },
     {
         "type": "function",
+        "name": "list_dir",
+        "description": (
+            "List entries in a directory of the project tree. Use this to explore "
+            "what's in the repo. Defaults to the project root. Hidden dotfiles are "
+            "filtered. Path is relative to project root unless absolute."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory path. Defaults to '.'", "default": "."},
+            },
+        },
+    },
+    {
+        "type": "function",
         "name": "git_status",
-        "description": "Show current git status of the project repo. (v0 stub — Phase 4)",
+        "description": "Run `git status -sb` in the project repo and return the output. Use this when the developer asks 'what's changed' / 'what's the state of git' / 'am I behind'.",
         "parameters": {"type": "object", "properties": {}},
     },
     {
         "type": "function",
         "name": "git_diff",
-        "description": "Show current git diff. (v0 stub — Phase 4)",
+        "description": "Run `git diff --stat` (or `--cached` when staged=true) and return the diff stat. Use to summarize changes.",
         "parameters": {
             "type": "object",
             "properties": {"staged": {"type": "boolean", "default": False}},
@@ -360,20 +475,10 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "name": "git_log",
-        "description": "Show recent git log. (v0 stub — Phase 4)",
+        "description": "Recent commits in the project repo. Default 10, max 50.",
         "parameters": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 10}},
-        },
-    },
-    {
-        "type": "function",
-        "name": "run_readonly",
-        "description": "Run a whitelisted read-only command (ls/grep/find/head/tail/cat/etc.). (v0 stub — Phase 4)",
-        "parameters": {
-            "type": "object",
-            "properties": {"cmd": {"type": "string"}},
-            "required": ["cmd"],
         },
     },
     {
@@ -408,13 +513,13 @@ TOOL_SCHEMAS = [
 
 DISPATCH = {
     "read_file": lambda args: read_file(args.get("path", "")),
+    "list_dir": lambda args: list_dir(args.get("path", ".")),
     "web_search_quick": lambda args: web_search_quick(args.get("query", "")),
     "web_search_deep": lambda args: web_search_deep(args.get("query", "")),
     "tmux_pane": lambda args: tmux_pane(args.get("name", "")),
     "git_status": lambda args: git_status(),
     "git_diff": lambda args: git_diff(args.get("staged", False)),
     "git_log": lambda args: git_log(args.get("limit", 10)),
-    "run_readonly": lambda args: run_readonly(args.get("cmd", "")),
     "send_to_pane": lambda args: send_to_pane(args.get("text", ""), args.get("name", "")),
 }
 
