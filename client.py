@@ -33,6 +33,8 @@ if not API_KEY:
 sys.path.insert(0, str(Path(__file__).parent))
 from tools import TOOL_SCHEMAS, dispatch, CWD_ROOT  # noqa: E402
 from watcher import Watcher  # noqa: E402
+from classifier import classify, PET_REACTION  # noqa: E402
+import state as stack_state  # noqa: E402
 
 # Surface the detected project root so it's obvious what Stack can see
 print(f"[scope] project root: {CWD_ROOT}", flush=True)
@@ -254,11 +256,10 @@ class Stack:
         self.watcher = Watcher()
         print(self.watcher.status(), flush=True)
 
-        # Pet subprocess
+        # Pet subprocess (mode is managed in state.py from STACK_MODE env)
         self.pet_process: subprocess.Popen | None = None
-        self.mode = os.environ.get("STACK_MODE", "pair")
         if PET_ENABLED:
-            _write_pet_state("idle", self.mode)
+            _write_pet_state("idle", stack_state.get_mode())
             try:
                 pet_path = Path(__file__).parent / "pet.py"
                 self.pet_process = subprocess.Popen(
@@ -417,7 +418,7 @@ class Stack:
                 with self.audio_lock:
                     self.audio_buf.extend(audio)
                 self.last_speaker_ms = time.monotonic() * 1000
-                _write_pet_state("speaking", self.mode)
+                _write_pet_state("speaking", stack_state.get_mode())
 
             elif t in ("response.audio_transcript.delta", "response.output_audio_transcript.delta"):
                 d = evt.get("delta", "")
@@ -446,7 +447,7 @@ class Stack:
                 name = evt["name"]
                 args = evt.get("arguments", "{}")
                 print(f"\n[tool] {name}({args[:120]})", flush=True)
-                _write_pet_state("thinking", self.mode, tool=name)
+                _write_pet_state("thinking", stack_state.get_mode(), tool=name)
                 self._write_session({"event": "tool_call", "name": name, "args": args})
                 self.had_tool_calls_in_response = True
                 result = await asyncio.get_running_loop().run_in_executor(None, dispatch, name, args)
@@ -464,7 +465,7 @@ class Stack:
                 self.response_active = True
                 self.response_active_since = time.monotonic()
                 self.had_tool_calls_in_response = False  # reset per response
-                _write_pet_state("thinking", self.mode)
+                _write_pet_state("thinking", stack_state.get_mode())
 
             elif t == "response.done":
                 self.response_active = False
@@ -476,26 +477,26 @@ class Stack:
                     self.had_tool_calls_in_response = False
                     await self.send({"type": "response.create"})
                 else:
-                    _write_pet_state("idle", self.mode)
+                    _write_pet_state("idle", stack_state.get_mode())
 
             elif t in ("response.cancelled", "response.canceled"):
                 # Explicit cancel from server (barge-in interrupt or our own response.cancel)
                 self.response_active = False
                 self.response_active_since = None
-                _write_pet_state("idle", self.mode)
+                _write_pet_state("idle", stack_state.get_mode())
 
             elif t == "input_audio_buffer.speech_started":
                 with self.audio_lock:
                     self.audio_buf.clear()
-                _write_pet_state("listening", self.mode)
+                _write_pet_state("listening", stack_state.get_mode())
 
             elif t == "input_audio_buffer.speech_stopped":
-                _write_pet_state("idle", self.mode)
+                _write_pet_state("idle", stack_state.get_mode())
 
             elif t == "error":
                 err = evt.get("error", {})
                 print(f"\n[error] {json.dumps(err)}", file=sys.stderr, flush=True)
-                _write_pet_state("alarmed", self.mode)
+                _write_pet_state("alarmed", stack_state.get_mode())
                 # If the error implies the response is no longer running,
                 # clear the gate so future nudges work. Conservative: clear on
                 # ANY error after at least 1s of activity — if a response was
@@ -508,17 +509,65 @@ class Stack:
 
             elif t == "session.created":
                 print(f"[session] {evt['session']['id']}", flush=True)
-                _write_pet_state("idle", self.mode)
+                _write_pet_state("idle", stack_state.get_mode())
+
+    async def _flash_pet_state(self, state: str, hold_sec: float = 4.0):
+        """Set pet state, hold briefly, then revert to idle. Fire-and-forget."""
+        _write_pet_state(state, stack_state.get_mode())
+        try:
+            await asyncio.sleep(hold_sec)
+        except asyncio.CancelledError:
+            return
+        _write_pet_state("idle", stack_state.get_mode())
 
     async def watch_consume_loop(self):
-        """Drain observations from the Watcher queue and inject as system
-        messages, then ask Stack to comment only if useful."""
+        """Drain observations from the Watcher queue. For each one:
+        1. Send through the classifier (cheap model pass).
+        2. If the classifier flags a pet-reaction category, flash the pet.
+        3. If noteworthy + mode allows, inject as a system message and nudge
+           a response. Otherwise drop silently — no spam.
+        """
         while not self.shutdown.is_set():
             obs = await self.watcher.queue.get()
             if not obs:
                 continue
-            print(f"\n[observe]\n{obs[:300]}", flush=True)
-            self._write_session({"event": "observation", "text": obs[:2000]})
+
+            # Classify in a thread (HTTP call to gpt-5-nano)
+            label = await asyncio.get_running_loop().run_in_executor(None, classify, obs)
+            category = label.get("category", "other")
+            severity = label.get("severity", "low")
+            summary = label.get("summary", "")
+            noteworthy = bool(label.get("noteworthy", False))
+
+            print(f"\n[observe] {category}/{severity} :: {summary}", flush=True)
+            self._write_session({"event": "observation", "label": label, "raw_preview": obs[:500]})
+
+            # Pet reaction (independent of whether we inject)
+            pet_react = PET_REACTION.get(category)
+            if pet_react:
+                asyncio.create_task(self._flash_pet_state(pet_react, hold_sec=4.0))
+
+            # Mode-aware injection policy
+            mode = stack_state.get_mode()
+            should_inject = noteworthy and (
+                (mode == "pair") or
+                (mode == "roast") or
+                (mode == "quiet" and severity == "high")
+            )
+            if not should_inject:
+                continue
+
+            # Build the system message — give the model the summary first, raw diff second
+            mode_suffix = ""
+            if mode == "roast":
+                mode_suffix = (
+                    " You are in ROAST mode. If this looks like the developer is going down a "
+                    "rabbit hole or making the same mistake, push back hard. No politeness padding."
+                )
+            elif mode == "quiet":
+                mode_suffix = (
+                    " You are in QUIET mode. Only speak because severity is high. Keep it to one short sentence."
+                )
             try:
                 await self.send({
                     "type": "conversation.item.create",
@@ -528,18 +577,16 @@ class Stack:
                         "content": [{
                             "type": "input_text",
                             "text": (
-                                "[Watcher observation — pane content updated]\n"
-                                f"{obs}\n\n"
-                                "Speak only if there is something specific and useful to say. "
-                                "Silence is fine. If everything looks routine, do NOT respond."
+                                f"[Watcher event — {category} / severity {severity}]\n"
+                                f"Summary: {summary}\n\n"
+                                f"Raw pane diff:\n{obs}\n\n"
+                                f"Speak only if there's something specific and useful to add. "
+                                f"Silence is fine.{mode_suffix}"
                             ),
                         }],
                     },
                 })
-                # Only nudge a new response if one isn't already running.
-                # Stuck-state guard: if a response has been "active" longer
-                # than response_stuck_timeout_sec, assume the .done event was
-                # lost (handler crash, network blip, etc.) and clear the gate.
+                # Stuck-state watchdog before nudging
                 if self.response_active and self.response_active_since:
                     age = time.monotonic() - self.response_active_since
                     if age > self.response_stuck_timeout_sec:

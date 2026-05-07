@@ -411,6 +411,17 @@ def _git(args: list[str], timeout: int = 10) -> tuple[bool, str]:
     return True, out.stdout.strip()
 
 
+def set_mode_tool(mode: str) -> str:
+    """Switch Stack's behavioral mode at runtime."""
+    from state import set_mode, get_mode, VALID_MODES
+    if not mode:
+        return f"current mode: {get_mode()}. Valid: {', '.join(VALID_MODES)}"
+    if set_mode(mode):
+        print(f"[mode] -> {mode}", flush=True)
+        return f"mode is now {mode}"
+    return f"[set_mode: invalid '{mode}'. Valid: {', '.join(VALID_MODES)}]"
+
+
 def send_to_pane(text: str, name: str = "") -> str:
     """Type text into the developer's working pane WITHOUT pressing Enter.
     Use only when explicitly asked. Newlines are stripped to prevent
@@ -582,6 +593,24 @@ TOOL_SCHEMAS = [
     },
     {
         "type": "function",
+        "name": "set_mode",
+        "description": (
+            "Switch Stack's behavioral mode at runtime. "
+            "'quiet' = only respond when directly addressed, no proactive interjections. "
+            "'pair' = default; interject on meaningful watcher events. "
+            "'roast' = active push-back on rabbit holes, more opinionated. "
+            "Use when the developer says 'go quiet' / 'switch to pair' / 'roast me' / 'pair mode'. "
+            "Pass empty string to just report the current mode."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "description": "quiet | pair | roast | (empty for current)"},
+            },
+        },
+    },
+    {
+        "type": "function",
         "name": "send_to_pane",
         "description": (
             "Type text into the developer's working pane (e.g. their Claude Code prompt) "
@@ -621,6 +650,7 @@ DISPATCH = {
     "git_diff": lambda args: git_diff(args.get("staged", False)),
     "git_log": lambda args: git_log(args.get("limit", 10)),
     "send_to_pane": lambda args: send_to_pane(args.get("text", ""), args.get("name", "")),
+    "set_mode": lambda args: set_mode_tool(args.get("mode", "")),
 }
 
 
