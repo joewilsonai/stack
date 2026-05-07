@@ -213,13 +213,14 @@ class Stack:
         self.gated_chunks = 0
         # Track whether a response is currently generating. We must NOT call
         # response.create while one is active — the API errors with
-        # 'conversation_already_has_active_response'. After tool results are
-        # delivered, the active response continues automatically.
-        # Stuck-state guard: also tracks when the response started so a
-        # watchdog can clear it if response.done never arrives (error path,
-        # disconnect, server-side cancel, etc.).
+        # 'conversation_already_has_active_response'.
+        # When a response completes WITH tool calls in it, the response is
+        # "done" but the model never spoke — we need to fire a fresh
+        # response.create to get the spoken continuation. Tracked via
+        # had_tool_calls_in_response.
         self.response_active = False
         self.response_active_since: float | None = None
+        self.had_tool_calls_in_response = False
         # If a response has been "active" longer than this, assume it's wedged
         # and clear the gate so future nudges aren't permanently suppressed.
         self.response_stuck_timeout_sec = 90
@@ -442,12 +443,13 @@ class Stack:
                 print(f"\n[tool] {name}({args[:120]})", flush=True)
                 _write_pet_state("thinking", self.mode, tool=name)
                 self._write_session({"event": "tool_call", "name": name, "args": args})
+                self.had_tool_calls_in_response = True
                 result = await asyncio.get_running_loop().run_in_executor(None, dispatch, name, args)
                 self._write_session({"event": "tool_result", "name": name, "preview": result[:400]})
-                # Always submit the result. Do NOT call response.create here —
-                # the active response continues automatically when results land.
-                # If there's no active response (rare), the post-completion path
-                # in response.done will handle starting a fresh one.
+                # Submit the tool output. Do NOT call response.create here —
+                # the response is still active (waiting on more parallel tool
+                # outputs, in some cases). The continuation is fired from
+                # response.done when had_tool_calls_in_response is set.
                 await self.send({
                     "type": "conversation.item.create",
                     "item": {"type": "function_call_output", "call_id": call_id, "output": result[:50000]},
@@ -456,12 +458,20 @@ class Stack:
             elif t == "response.created":
                 self.response_active = True
                 self.response_active_since = time.monotonic()
+                self.had_tool_calls_in_response = False  # reset per response
                 _write_pet_state("thinking", self.mode)
 
             elif t == "response.done":
                 self.response_active = False
                 self.response_active_since = None
-                _write_pet_state("idle", self.mode)
+                # If this response was completed by emitting tool calls (with
+                # outputs already submitted), fire a fresh response.create so
+                # the model continues and actually speaks the answer.
+                if self.had_tool_calls_in_response:
+                    self.had_tool_calls_in_response = False
+                    await self.send({"type": "response.create"})
+                else:
+                    _write_pet_state("idle", self.mode)
 
             elif t in ("response.cancelled", "response.canceled"):
                 # Explicit cancel from server (barge-in interrupt or our own response.cancel)
