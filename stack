@@ -1,0 +1,97 @@
+#!/bin/bash
+# stack — one command to launch Stack in a new pane watching your current pane.
+#
+# Usage:
+#   stack                # auto-split (cmux/tmux), watch the pane you ran this from
+#   stack here           # run in the current pane (no auto-split)
+#   stack --no-split     # alias for `stack here`
+#   stack <args>         # any other args pass through to run.sh
+#
+# Env overrides:
+#   STACK_SPLIT_DIR      direction for the new pane (left|right|up|down, default right)
+#   STACK_WATCH=0        disable watcher (still splits the pane)
+#   STACK_PET=0          disable pet
+set -e
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Pass-through "here" / "--no-split" — just run in this pane
+case "${1:-}" in
+  here|--no-split)
+    shift
+    exec "$SCRIPT_DIR/run.sh" "$@"
+    ;;
+esac
+
+DIRECTION="${STACK_SPLIT_DIR:-right}"
+
+# ─── cmux ──────────────────────────────────────────────────────────────────
+if [ -n "$CMUX_WORKSPACE_ID" ]; then
+  CMUX_BIN="${CMUX_BUNDLED_CLI_PATH:-cmux}"
+  if ! command -v "$CMUX_BIN" >/dev/null 2>&1 && [ ! -x "$CMUX_BIN" ]; then
+    CMUX_BIN="$(command -v cmux 2>/dev/null || true)"
+  fi
+  if [ -z "$CMUX_BIN" ]; then
+    echo "[stack] cmux env detected but cmux CLI not found. Falling back to direct run." >&2
+    exec "$SCRIPT_DIR/run.sh" "$@"
+  fi
+
+  # Origin = the pane we're being launched from
+  ORIGIN="${CMUX_SURFACE_ID:-}"
+  if [ -z "$ORIGIN" ]; then
+    ORIGIN=$("$CMUX_BIN" list-panels 2>/dev/null | awk '/\[focused\]/ {for(i=1;i<=NF;i++) if($i~/^surface:[0-9]+$/) print $i}' | head -1)
+  fi
+  if [ -z "$ORIGIN" ]; then
+    echo "[stack] couldn't determine origin pane — falling back to direct run." >&2
+    exec "$SCRIPT_DIR/run.sh" "$@"
+  fi
+
+  # Create the new pane
+  OUT=$("$CMUX_BIN" new-split "$DIRECTION" 2>&1) || {
+    echo "[stack] new-split failed: $OUT" >&2
+    exit 1
+  }
+  NEW=$(echo "$OUT" | grep -oE "surface:[0-9]+" | head -1)
+  if [ -z "$NEW" ]; then
+    echo "[stack] couldn't parse new surface from: $OUT" >&2
+    exit 1
+  fi
+
+  # Give the new pane a beat to be ready for input
+  sleep 0.4
+
+  # Pass extra args to run.sh by quoting them into a single shell-safe string
+  EXTRA=""
+  for a in "$@"; do
+    EXTRA="$EXTRA $(printf '%q' "$a")"
+  done
+
+  CMD="STACK_WATCH_PANE=$ORIGIN exec $SCRIPT_DIR/run.sh$EXTRA"
+  "$CMUX_BIN" send --surface "$NEW" "$CMD"$'\n'
+
+  echo "[stack] launched in $NEW (watching $ORIGIN)"
+  exit 0
+fi
+
+# ─── tmux ──────────────────────────────────────────────────────────────────
+if [ -n "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
+  ORIGIN="$TMUX_PANE"
+  case "$DIRECTION" in
+    right) FLAG="-h" ;;
+    left)  FLAG="-hb" ;;
+    down)  FLAG="-v" ;;
+    up)    FLAG="-vb" ;;
+    *)     FLAG="-h" ;;
+  esac
+  EXTRA=""
+  for a in "$@"; do
+    EXTRA="$EXTRA $(printf '%q' "$a")"
+  done
+  NEW=$(tmux split-window $FLAG -d -P -F "#{pane_id}" "STACK_WATCH_PANE=$ORIGIN exec $SCRIPT_DIR/run.sh$EXTRA")
+  echo "[stack] launched in $NEW (watching $ORIGIN)"
+  exit 0
+fi
+
+# ─── plain terminal ────────────────────────────────────────────────────────
+echo "[stack] not in cmux/tmux — running here (no pane watching)."
+exec "$SCRIPT_DIR/run.sh" "$@"

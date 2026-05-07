@@ -47,19 +47,33 @@ Switch by saying *"go quiet"* / *"switch to pair"* / *"roast me"*.
 ```bash
 git clone https://github.com/PoliTwit1984/stack.git ~/stack
 cd ~/stack
-./install.sh         # creates venv, installs deps, writes ~/.config/stack/deny.json from template
+./install.sh         # creates venv, installs deps, writes ~/.config/stack/deny.json
+                     # also symlinks 'stack' to ~/.local/bin (or /usr/local/bin)
 ```
 
-Set your OpenAI key:
+Add your OpenAI key:
 
 ```bash
-export OPENAI_API_KEY=sk-...
+echo "OPENAI_API_KEY=sk-..." > ~/stack/.env
 ```
 
-Run it:
+## Run
+
+From inside any project directory you're working in (in cmux or tmux):
 
 ```bash
-./run.sh
+stack
+```
+
+That's it. Stack splits a new pane to the right, runs itself there, and starts watching the pane you launched it from. Keep coding in your original pane; Stack will speak up when it sees something worth commenting on.
+
+Other invocations:
+
+```bash
+stack here          # run in the current pane (no auto-split)
+STACK_SPLIT_DIR=down stack    # split downward instead of right
+STACK_PET=0 stack             # disable the floating pet
+STACK_WATCH=0 stack           # disable the pane watcher
 ```
 
 ## Privacy & file access
