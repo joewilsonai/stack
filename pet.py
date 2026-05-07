@@ -315,7 +315,11 @@ class PetController(NSObject):
             NSApplication.sharedApplication().terminate_(None)
 
 
+_controller_ref = None  # module-level reference to keep controller from being GC'd
+
+
 def main():
+    global _controller_ref
     # Initialize state file with idle if not present
     if not STATE_FILE.exists():
         STATE_FILE.write_text(json.dumps({"state": "idle", "mode": "pair", "tool": None}))
@@ -324,10 +328,7 @@ def main():
     # Hide dock icon — agent-only app
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
 
-    controller = PetController.alloc().init()
-    # Keep a reference so it isn't GC'd
-    app._stack_pet_controller = controller
-
+    _controller_ref = PetController.alloc().init()
     app.run()
 
 
