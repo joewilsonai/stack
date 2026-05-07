@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import urllib.request
 import urllib.error
@@ -228,6 +230,48 @@ def run_readonly(cmd: str) -> str:
     return _not_implemented("run_readonly")
 
 
+def send_to_pane(text: str, name: str = "") -> str:
+    """Type text into the developer's working pane WITHOUT pressing Enter.
+    Use only when explicitly asked. Newlines are stripped to prevent
+    accidental Enter (cmux interprets \\n as Enter)."""
+    if not text:
+        return "[send_to_pane: empty text]"
+    target = name or os.environ.get("STACK_WATCH_PANE", "")
+    if not target:
+        return "[send_to_pane: no target pane]"
+
+    # Strip newlines so we never press Enter automatically
+    safe = text.replace("\r", "").replace("\n", " ")
+
+    cmux_bin = os.environ.get("CMUX_BUNDLED_CLI_PATH") or shutil.which("cmux")
+    if cmux_bin and os.environ.get("CMUX_WORKSPACE_ID"):
+        try:
+            subprocess.run(
+                [cmux_bin, "send", "--surface", target, "--", safe],
+                check=True, capture_output=True, timeout=5,
+            )
+            print(f"[send -> {target}] {safe[:120]}{'…' if len(safe) > 120 else ''}", flush=True)
+            return f"typed (no enter): {safe[:80]}{'…' if len(safe) > 80 else ''}"
+        except subprocess.CalledProcessError as e:
+            return f"[send_to_pane: cmux send failed: {e.stderr.decode(errors='replace')[:200]}]"
+        except Exception as e:
+            return f"[send_to_pane: error: {e}]"
+
+    tmux_bin = shutil.which("tmux")
+    if tmux_bin and os.environ.get("TMUX"):
+        try:
+            subprocess.run(
+                [tmux_bin, "send-keys", "-t", target, "-l", safe],
+                check=True, capture_output=True, timeout=5,
+            )
+            print(f"[send -> {target}] {safe[:120]}", flush=True)
+            return f"typed (no enter): {safe[:80]}"
+        except Exception as e:
+            return f"[send_to_pane: tmux send-keys failed: {e}]"
+
+    return "[send_to_pane: no cmux/tmux backend detected]"
+
+
 # ============================================================
 # Tool schemas exposed to gpt-realtime-2
 # ============================================================
@@ -332,6 +376,33 @@ TOOL_SCHEMAS = [
             "required": ["cmd"],
         },
     },
+    {
+        "type": "function",
+        "name": "send_to_pane",
+        "description": (
+            "Type text into the developer's working pane (e.g. their Claude Code prompt) "
+            "WITHOUT pressing Enter. The developer presses Enter themselves. "
+            "Use ONLY when the developer explicitly asks: 'send to Claude' / 'type that for me' / "
+            "'inject this' / 'tell Claude to X' / 'put X in the prompt' / 'dictate this'. "
+            "Do NOT use proactively. Do NOT type your own thoughts as if they were the developer's. "
+            "After typing, briefly tell the developer what was typed and that they can press Enter to send. "
+            "Newlines in the text are stripped to prevent accidental submission."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Exact text to type. Will not press Enter.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional pane ref. Defaults to the watched pane.",
+                },
+            },
+            "required": ["text"],
+        },
+    },
 ]
 
 
@@ -344,6 +415,7 @@ DISPATCH = {
     "git_diff": lambda args: git_diff(args.get("staged", False)),
     "git_log": lambda args: git_log(args.get("limit", 10)),
     "run_readonly": lambda args: run_readonly(args.get("cmd", "")),
+    "send_to_pane": lambda args: send_to_pane(args.get("text", ""), args.get("name", "")),
 }
 
 
