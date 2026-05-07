@@ -81,8 +81,11 @@ if [ -n "$CMUX_WORKSPACE_ID" ]; then
   # Also: cmux new-split inherits the workspace's default cwd, NOT the
   # caller's. We cd back to the invocation directory inside the command we
   # send so Stack's project-root detection finds the right repo.
+  # STACK_SELF_SURFACE tells the watcher which pane is itself so it doesn't
+  # watch its own output. (cmux list-panels without --id-format both doesn't
+  # surface UUIDs, so matching CMUX_SURFACE_ID directly is unreliable.)
   CALL_CWD="$(printf '%q' "$PWD")"
-  CMD="cd $CALL_CWD && STACK_WATCH_PANE=$ORIGIN $SCRIPT_DIR/run.sh$EXTRA"
+  CMD="cd $CALL_CWD && STACK_SELF_SURFACE=$NEW STACK_WATCH_PANE=$ORIGIN $SCRIPT_DIR/run.sh$EXTRA"
   "$CMUX_BIN" send --surface "$NEW" "$CMD"$'\n'
 
   echo "[stack] launched in $NEW (watching $ORIGIN)"

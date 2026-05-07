@@ -59,7 +59,14 @@ class PaneInfo:
 
 
 def _list_panes_cmux() -> list[PaneInfo]:
-    """List cmux surfaces in the current workspace. Marks our own pane as is_self."""
+    """List cmux surfaces in the current workspace. Marks our own pane as is_self.
+
+    Self-detection priority:
+      1. STACK_SELF_SURFACE env var (set by the launcher to the new pane's ref) — most reliable
+      2. CMUX_SURFACE_ID UUID matched in --id-format both output
+      3. CMUX_PANEL_ID UUID matched in --id-format both output
+    """
+    self_ref = os.environ.get("STACK_SELF_SURFACE", "").strip()
     self_surface = os.environ.get("CMUX_SURFACE_ID", "")
     self_panel = os.environ.get("CMUX_PANEL_ID", "")
     try:
@@ -83,18 +90,16 @@ def _list_panes_cmux() -> list[PaneInfo]:
         line = line.strip()
         if not line:
             continue
-        # Format like:  "* surface:1  terminal  [focused]  \"<title>\""
-        # Or with --id-format both: "* surface:1 [<uuid>]  terminal  ..."
         m = re.search(r"(surface:\d+)", line)
         if not m:
             continue
         ref = m.group(1)
-        # Extract optional title in quotes
         tm = re.search(r'"([^"]*)"', line)
         title = tm.group(1) if tm else ""
-        # Detect self by UUID match if present
-        is_self = bool(self_surface and self_surface in line) or bool(
-            self_panel and self_panel in line
+        is_self = (
+            (self_ref and ref == self_ref)
+            or bool(self_surface and self_surface in line)
+            or bool(self_panel and self_panel in line)
         )
         panes.append(PaneInfo(ref=ref, title=title, is_self=is_self))
     return panes
