@@ -215,7 +215,14 @@ class Stack:
         # response.create while one is active — the API errors with
         # 'conversation_already_has_active_response'. After tool results are
         # delivered, the active response continues automatically.
+        # Stuck-state guard: also tracks when the response started so a
+        # watchdog can clear it if response.done never arrives (error path,
+        # disconnect, server-side cancel, etc.).
         self.response_active = False
+        self.response_active_since: float | None = None
+        # If a response has been "active" longer than this, assume it's wedged
+        # and clear the gate so future nudges aren't permanently suppressed.
+        self.response_stuck_timeout_sec = 90
 
         # Transcript persistence (outside the repo, in XDG state)
         sessions_dir = _session_dir()
@@ -448,10 +455,18 @@ class Stack:
 
             elif t == "response.created":
                 self.response_active = True
+                self.response_active_since = time.monotonic()
                 _write_pet_state("thinking", self.mode)
 
             elif t == "response.done":
                 self.response_active = False
+                self.response_active_since = None
+                _write_pet_state("idle", self.mode)
+
+            elif t in ("response.cancelled", "response.canceled"):
+                # Explicit cancel from server (barge-in interrupt or our own response.cancel)
+                self.response_active = False
+                self.response_active_since = None
                 _write_pet_state("idle", self.mode)
 
             elif t == "input_audio_buffer.speech_started":
@@ -463,8 +478,18 @@ class Stack:
                 _write_pet_state("idle", self.mode)
 
             elif t == "error":
-                print(f"\n[error] {json.dumps(evt.get('error', evt))}", file=sys.stderr, flush=True)
+                err = evt.get("error", {})
+                print(f"\n[error] {json.dumps(err)}", file=sys.stderr, flush=True)
                 _write_pet_state("alarmed", self.mode)
+                # If the error implies the response is no longer running,
+                # clear the gate so future nudges work. Conservative: clear on
+                # ANY error after at least 1s of activity — if a response was
+                # actually still running, the next response.created will reset
+                # us back to active=True correctly.
+                if self.response_active and self.response_active_since:
+                    if time.monotonic() - self.response_active_since > 1.0:
+                        self.response_active = False
+                        self.response_active_since = None
 
             elif t == "session.created":
                 print(f"[session] {evt['session']['id']}", flush=True)
@@ -496,7 +521,16 @@ class Stack:
                         }],
                     },
                 })
-                # Only nudge a new response if one isn't already running
+                # Only nudge a new response if one isn't already running.
+                # Stuck-state guard: if a response has been "active" longer
+                # than response_stuck_timeout_sec, assume the .done event was
+                # lost (handler crash, network blip, etc.) and clear the gate.
+                if self.response_active and self.response_active_since:
+                    age = time.monotonic() - self.response_active_since
+                    if age > self.response_stuck_timeout_sec:
+                        print(f"[watchdog] response_active stuck for {age:.0f}s — clearing gate", flush=True)
+                        self.response_active = False
+                        self.response_active_since = None
                 if not self.response_active:
                     await self.send({"type": "response.create"})
             except Exception as e:
