@@ -1,0 +1,26 @@
+{
+  "_comment": "Copy this file to ~/.config/stack/deny.json and customize. Stack refuses to start if ~/.config/stack/deny.json is missing or invalid.",
+  "denied_roots": [
+    "~/.ssh",
+    "~/.aws",
+    "~/.config/gh",
+    "~/.config/op",
+    "~/.gnupg",
+    "~/.docker",
+    "~/.kube",
+    "~/.netrc",
+    "~/.pgpass",
+    "~/.npmrc",
+    "~/.pypirc",
+    "~/Library/Keychains",
+    "~/.local/share/keyrings"
+  ],
+  "denied_extensions": [
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".kdbx"
+  ]
+}
