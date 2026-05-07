@@ -44,6 +44,27 @@ INPUT_CHUNK_MS = 30
 INPUT_CHUNK_SAMPLES = SAMPLE_RATE * INPUT_CHUNK_MS // 1000
 OUTPUT_BLOCKSIZE = 1200
 
+# Override audio devices via env vars. Accepts either an integer index or a
+# substring of the device name (case-insensitive). If unset, sounddevice's
+# default is used. Useful when macOS picks a webcam mic that's not capturing.
+INPUT_DEVICE_OVERRIDE = os.environ.get("STACK_INPUT_DEVICE", "").strip() or None
+OUTPUT_DEVICE_OVERRIDE = os.environ.get("STACK_OUTPUT_DEVICE", "").strip() or None
+
+
+def _resolve_device(spec, kind):
+    """Resolve env-var override to a sounddevice device id. Returns None for default."""
+    if not spec:
+        return None
+    if spec.isdigit():
+        return int(spec)
+    spec_low = spec.lower()
+    for i, d in enumerate(sd.query_devices()):
+        ch = d["max_input_channels"] if kind == "input" else d["max_output_channels"]
+        if ch > 0 and spec_low in d["name"].lower():
+            return i
+    print(f"[audio] {kind} device matching '{spec}' not found; using system default", file=sys.stderr)
+    return None
+
 # Half-duplex echo gate — suppress mic upload while speakers are playing the
 # model's voice. Eliminates the VAD-triggered self-interruption loop on speakers.
 SPEAKER_TAIL_MS = 280
@@ -288,9 +309,16 @@ class Stack:
                 print(f"[mic] {status}", file=sys.stderr)
             loop.call_soon_threadsafe(q.put_nowait, bytes(indata))
 
+        in_device = _resolve_device(INPUT_DEVICE_OVERRIDE, "input")
+        if in_device is not None:
+            try:
+                name = sd.query_devices(in_device)["name"]
+                print(f"[audio] input device: [{in_device}] {name}", flush=True)
+            except Exception:
+                pass
         self.input_stream = sd.RawInputStream(
             samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16",
-            blocksize=INPUT_CHUNK_SAMPLES, callback=callback,
+            blocksize=INPUT_CHUNK_SAMPLES, callback=callback, device=in_device,
         )
         self.input_stream.start()
         try:
@@ -340,9 +368,16 @@ class Stack:
                 else:
                     outdata[:] = b"\x00" * need
 
+        out_device = _resolve_device(OUTPUT_DEVICE_OVERRIDE, "output")
+        if out_device is not None:
+            try:
+                name = sd.query_devices(out_device)["name"]
+                print(f"[audio] output device: [{out_device}] {name}", flush=True)
+            except Exception:
+                pass
         self.output_stream = sd.RawOutputStream(
             samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16",
-            blocksize=OUTPUT_BLOCKSIZE, callback=callback,
+            blocksize=OUTPUT_BLOCKSIZE, callback=callback, device=out_device,
         )
         self.output_stream.start()
         try:

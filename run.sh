@@ -8,10 +8,10 @@ if [ ! -d .venv ]; then
   exit 1
 fi
 
-if [ -z "$OPENAI_API_KEY" ]; then
-  if [ -f .env ]; then
-    set -a; . ./.env; set +a
-  fi
+# Always source .env if present (loads OPENAI_API_KEY + any STACK_* overrides
+# like STACK_INPUT_DEVICE, STACK_VOICE, etc.). Existing env vars take precedence.
+if [ -f .env ]; then
+  set -a; . ./.env; set +a
 fi
 
 if [ -z "$OPENAI_API_KEY" ]; then
