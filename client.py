@@ -91,6 +91,93 @@ def _session_dir() -> Path:
     return d
 
 
+# Auto-resume: if the most recent session in this repo's session dir ended
+# within RESUME_WINDOW_MIN minutes, replay the last RESUME_TURNS exchanges
+# as a system-prompt context block. Pass --no-resume on the command line
+# to force a fresh start.
+RESUME_WINDOW_MIN = int(os.environ.get("STACK_RESUME_WINDOW_MIN", "30"))
+RESUME_TURNS = int(os.environ.get("STACK_RESUME_TURNS", "10"))
+RESUME_CHAR_BUDGET = int(os.environ.get("STACK_RESUME_CHARS", "2400"))
+
+
+def _load_resume_context() -> tuple[str | None, str | None]:
+    """Returns (resume_block, banner) or (None, None) if nothing to resume.
+
+    resume_block: text to append to the system prompt (or None for fresh).
+    banner:       short status line to print on startup (or None).
+    """
+    if "--no-resume" in sys.argv or os.environ.get("STACK_RESUME", "1") == "0":
+        return None, None
+
+    sessions = _session_dir()
+    candidates = sorted(sessions.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        return None, None
+
+    latest = candidates[0]
+    age_sec = time.time() - latest.stat().st_mtime
+    if age_sec > RESUME_WINDOW_MIN * 60:
+        return None, None  # too old, fresh start
+
+    # Parse the JSONL — extract user / stack turns in order
+    turns: list[tuple[str, str]] = []  # (role, text)
+    last_event_time: str | None = None
+    try:
+        with latest.open() as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ev = rec.get("event")
+                if ev == "user":
+                    turns.append(("developer", rec.get("text", "")))
+                    last_event_time = rec.get("ts", last_event_time)
+                elif ev == "stack":
+                    turns.append(("you (Stack)", rec.get("text", "")))
+                    last_event_time = rec.get("ts", last_event_time)
+    except OSError:
+        return None, None
+
+    if not turns:
+        return None, None
+
+    # Take only the last N turns, then trim total length to budget
+    recent = turns[-RESUME_TURNS:]
+    formatted_lines: list[str] = []
+    total = 0
+    for role, text in recent:
+        line = f"[{role}] {text}"
+        if total + len(line) > RESUME_CHAR_BUDGET:
+            # If we'd blow the budget, drop earliest until we fit
+            while formatted_lines and total + len(line) > RESUME_CHAR_BUDGET:
+                dropped = formatted_lines.pop(0)
+                total -= len(dropped)
+        formatted_lines.append(line)
+        total += len(line)
+
+    age_min = max(1, int(age_sec / 60))
+    last_seen = last_event_time or time.strftime("%H:%M:%S", time.localtime(latest.stat().st_mtime))
+
+    block = (
+        f"\n\n# Resumed conversation context\n\n"
+        f"You were just talking with this developer {age_min} minute"
+        f"{'s' if age_min != 1 else ''} ago (last activity {last_seen}). "
+        f"Pick up naturally — do NOT re-introduce yourself, do NOT re-greet. "
+        f"If they ask 'what were we doing,' use the recent turns below. "
+        f"If a topic looks half-finished, you can ask whether to keep going.\n\n"
+        f"Recent turns (oldest first):\n\n"
+        + "\n\n".join(formatted_lines)
+        + "\n"
+    )
+
+    banner = (
+        f"[resume] picking up from {latest.name} "
+        f"({age_min}m old, {len(recent)} turns, {len(formatted_lines)} included)"
+    )
+    return block, banner
+
+
 class Stack:
     def __init__(self):
         self.ws = None
@@ -114,6 +201,14 @@ class Stack:
         self.user_turns = 0
         self.assistant_turns = 0
         self._write_session({"event": "start", "model": MODEL, "voice": VOICE, "cwd": str(Path.cwd())})
+
+        # Auto-resume: load recent prior session if within window
+        resume_block, banner = _load_resume_context()
+        self.system_prompt = SYSTEM_PROMPT + (resume_block or "")
+        self.is_resumed = resume_block is not None
+        if banner:
+            print(banner, flush=True)
+            self._write_session({"event": "resume", "info": banner})
 
         # Pet subprocess
         self.pet_process: subprocess.Popen | None = None
@@ -144,7 +239,7 @@ class Stack:
             "session": {
                 "type": "realtime",
                 "output_modalities": ["audio"],
-                "instructions": SYSTEM_PROMPT,
+                "instructions": self.system_prompt,
                 "tools": TOOL_SCHEMAS,
                 "tool_choice": "auto",
                 "audio": {
