@@ -78,7 +78,11 @@ if [ -n "$CMUX_WORKSPACE_ID" ]; then
 
   # No `exec` — if run.sh exits for any reason (auth fail, port conflict),
   # the shell stays so you can see the error instead of the pane closing.
-  CMD="STACK_WATCH_PANE=$ORIGIN $SCRIPT_DIR/run.sh$EXTRA"
+  # Also: cmux new-split inherits the workspace's default cwd, NOT the
+  # caller's. We cd back to the invocation directory inside the command we
+  # send so Stack's project-root detection finds the right repo.
+  CALL_CWD="$(printf '%q' "$PWD")"
+  CMD="cd $CALL_CWD && STACK_WATCH_PANE=$ORIGIN $SCRIPT_DIR/run.sh$EXTRA"
   "$CMUX_BIN" send --surface "$NEW" "$CMD"$'\n'
 
   echo "[stack] launched in $NEW (watching $ORIGIN)"
