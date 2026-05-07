@@ -2,3 +2,5 @@ openai>=1.50.0
 sounddevice>=0.5.0
 numpy>=1.24
 websockets>=12.0
+pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-Quartz>=10.0

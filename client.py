@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -58,6 +59,28 @@ PERSONA_PATH = Path(__file__).parent / "persona.md"
 SYSTEM_PROMPT = PERSONA_PATH.read_text() if PERSONA_PATH.exists() else "You are Stack."
 
 
+PET_ENABLED = os.environ.get("STACK_PET", "1") != "0"
+PET_STATE_FILE = (
+    Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+    / "stack" / "pet_state.json"
+)
+PET_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _write_pet_state(state: str, mode: str = "pair", tool: str | None = None):
+    """Atomically write the pet's current state. Pet polls this file."""
+    if not PET_ENABLED:
+        return
+    payload = json.dumps({"state": state, "mode": mode, "tool": tool, "ts": int(time.time() * 1000)})
+    try:
+        # Atomic write: write to temp + rename so the pet never reads a partial file
+        tmp = PET_STATE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(payload)
+        tmp.replace(PET_STATE_FILE)
+    except Exception:
+        pass
+
+
 def _session_dir() -> Path:
     """Collision-safe per-repo session directory under XDG state."""
     xdg_state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
@@ -91,6 +114,22 @@ class Stack:
         self.user_turns = 0
         self.assistant_turns = 0
         self._write_session({"event": "start", "model": MODEL, "voice": VOICE, "cwd": str(Path.cwd())})
+
+        # Pet subprocess
+        self.pet_process: subprocess.Popen | None = None
+        self.mode = os.environ.get("STACK_MODE", "pair")
+        if PET_ENABLED:
+            _write_pet_state("idle", self.mode)
+            try:
+                pet_path = Path(__file__).parent / "pet.py"
+                self.pet_process = subprocess.Popen(
+                    [sys.executable, str(pet_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                print(f"[pet] spawned pid={self.pet_process.pid}", flush=True)
+            except Exception as e:
+                print(f"[pet] failed to spawn: {e}", flush=True)
 
     async def connect(self):
         headers = [("Authorization", f"Bearer {API_KEY}")]
@@ -225,6 +264,7 @@ class Stack:
                 with self.audio_lock:
                     self.audio_buf.extend(audio)
                 self.last_speaker_ms = time.monotonic() * 1000
+                _write_pet_state("speaking", self.mode)
 
             elif t in ("response.audio_transcript.delta", "response.output_audio_transcript.delta"):
                 d = evt.get("delta", "")
@@ -253,6 +293,7 @@ class Stack:
                 name = evt["name"]
                 args = evt.get("arguments", "{}")
                 print(f"\n[tool] {name}({args[:120]})", flush=True)
+                _write_pet_state("thinking", self.mode, tool=name)
                 self._write_session({"event": "tool_call", "name": name, "args": args})
                 result = await asyncio.get_running_loop().run_in_executor(None, dispatch, name, args)
                 self._write_session({"event": "tool_result", "name": name, "preview": result[:400]})
@@ -262,15 +303,27 @@ class Stack:
                 })
                 await self.send({"type": "response.create"})
 
+            elif t == "response.created":
+                _write_pet_state("thinking", self.mode)
+
+            elif t == "response.done":
+                _write_pet_state("idle", self.mode)
+
             elif t == "input_audio_buffer.speech_started":
                 with self.audio_lock:
                     self.audio_buf.clear()
+                _write_pet_state("listening", self.mode)
+
+            elif t == "input_audio_buffer.speech_stopped":
+                _write_pet_state("idle", self.mode)
 
             elif t == "error":
                 print(f"\n[error] {json.dumps(evt.get('error', evt))}", file=sys.stderr, flush=True)
+                _write_pet_state("alarmed", self.mode)
 
             elif t == "session.created":
                 print(f"[session] {evt['session']['id']}", flush=True)
+                _write_pet_state("idle", self.mode)
 
     async def run(self):
         await self.connect()
@@ -307,6 +360,16 @@ async def main():
             s.session_file.close()
         except Exception:
             pass
+        # Kill the pet subprocess
+        if s.pet_process is not None:
+            try:
+                s.pet_process.terminate()
+                try:
+                    s.pet_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    s.pet_process.kill()
+            except Exception:
+                pass
         print(f"[transcript] {s.session_path}", flush=True)
 
 
