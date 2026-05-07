@@ -217,25 +217,60 @@ def _not_implemented(name: str) -> str:
 
 
 def tmux_pane(name: str = "") -> str:
-    """Capture recent output from a tmux/cmux pane. Defaults to the pane Stack
-    is watching (STACK_WATCH_PANE) — usually the developer's working pane."""
-    target = name or os.environ.get("STACK_WATCH_PANE", "")
-    if not target:
-        return "[tmux_pane: no pane specified and STACK_WATCH_PANE not set — Stack was likely launched without a watch target]"
+    """Capture recent output from one or all panes.
+    - With no arg: scans ALL non-self panes and returns each labeled.
+    - With `name`: captures that specific pane.
+    """
     try:
-        # Local import to avoid circulars at module load
-        from watcher import capture_pane
+        from watcher import capture_pane, list_panes
     except ImportError:
         return "[tmux_pane: watcher module not available]"
-    out = capture_pane(target)
-    if out is None:
-        return f"[tmux_pane: failed to capture {target}]"
-    if not out.strip():
-        return f"[tmux_pane: {target} is empty]"
-    # Cap output at 8000 chars
-    if len(out) > 8000:
-        out = "[truncated to last 8000 chars]\n" + out[-8000:]
-    return f"=== {target} ===\n{out}"
+
+    # Specific pane requested
+    if name:
+        out = capture_pane(name)
+        if out is None:
+            return f"[tmux_pane: failed to capture {name}]"
+        if not out.strip():
+            return f"[tmux_pane: {name} is empty]"
+        if len(out) > 8000:
+            out = "[truncated to last 8000 chars]\n" + out[-8000:]
+        return f"=== {name} ===\n{out}"
+
+    # No arg: scan all non-self panes
+    panes = [p for p in list_panes() if not p.is_self]
+    if not panes:
+        return "[tmux_pane: no other panes are open right now]"
+    parts: list[str] = []
+    for p in panes:
+        cap = capture_pane(p.ref)
+        if cap is None or not cap.strip():
+            continue
+        # Trim per-pane to keep total output manageable when scanning many
+        if len(cap) > 3000:
+            cap = "[trimmed to last 3000 chars]\n" + cap[-3000:]
+        title = f' "{p.title}"' if p.title else ""
+        parts.append(f"=== {p.ref}{title} ===\n{cap}")
+    if not parts:
+        return "[tmux_pane: scanned " + str(len(panes)) + " pane(s) but they were all empty]"
+    return f"[scanned {len(panes)} pane(s)]\n\n" + "\n\n".join(parts)
+
+
+def list_panes_tool() -> str:
+    """Enumerate all panes in the current tmux/cmux workspace."""
+    try:
+        from watcher import list_panes
+    except ImportError:
+        return "[list_panes: watcher module not available]"
+    panes = list_panes()
+    if not panes:
+        return "[no panes detected — Stack may not be running inside cmux/tmux]"
+    lines = ["=== panes ==="]
+    for p in panes:
+        marker = " (Stack itself)" if p.is_self else ""
+        title = f' "{p.title}"' if p.title else ""
+        lines.append(f"  {p.ref}{title}{marker}")
+    return "\n".join(lines)
 
 
 def git_status() -> str:
@@ -518,21 +553,31 @@ TOOL_SCHEMAS = [
         "type": "function",
         "name": "tmux_pane",
         "description": (
-            "Read recent terminal output from the developer's working pane. "
-            "Call this when the user asks 'what do you see' / 'check my terminal' / "
-            "'didn't you see X' or whenever you need to know what they're looking at. "
-            "By default reads the pane Stack is watching — pass no arguments. "
-            "Only pass `name` if you specifically need to read a different pane."
+            "Read recent terminal output from panes. **By default (no arguments) "
+            "scans ALL non-self panes** in the workspace and returns each labeled — "
+            "use this when the developer says 'what do you see' / 'check my terminal' / "
+            "'didn't you see X', because the error or output may be in a different "
+            "pane than Stack's primary watch target. Only pass `name` if you specifically "
+            "need to read one pane (e.g., the developer named one)."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Optional pane ref/UUID. Leave empty to read the watched pane.",
+                    "description": "Optional pane ref. Leave empty to scan all panes.",
                 },
             },
         },
+    },
+    {
+        "type": "function",
+        "name": "list_panes",
+        "description": (
+            "List all panes/surfaces in the current tmux/cmux workspace. Useful when "
+            "the developer asks 'what panes do you see' / 'how many panes are open'."
+        ),
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "type": "function",
@@ -646,6 +691,7 @@ DISPATCH = {
     "web_search_quick": lambda args: web_search_quick(args.get("query", "")),
     "web_search_deep": lambda args: web_search_deep(args.get("query", "")),
     "tmux_pane": lambda args: tmux_pane(args.get("name", "")),
+    "list_panes": lambda args: list_panes_tool(),
     "git_status": lambda args: git_status(),
     "git_diff": lambda args: git_diff(args.get("staged", False)),
     "git_log": lambda args: git_log(args.get("limit", 10)),
