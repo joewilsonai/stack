@@ -32,6 +32,7 @@ if not API_KEY:
 
 sys.path.insert(0, str(Path(__file__).parent))
 from tools import TOOL_SCHEMAS, dispatch  # noqa: E402
+from watcher import Watcher  # noqa: E402
 
 MODEL = os.environ.get("STACK_MODEL", "gpt-realtime-2")
 VOICE = os.environ.get("STACK_VOICE", "cedar")
@@ -209,6 +210,10 @@ class Stack:
         if banner:
             print(banner, flush=True)
             self._write_session({"event": "resume", "info": banner})
+
+        # Pane watcher
+        self.watcher = Watcher()
+        print(self.watcher.status(), flush=True)
 
         # Pet subprocess
         self.pet_process: subprocess.Popen | None = None
@@ -420,10 +425,44 @@ class Stack:
                 print(f"[session] {evt['session']['id']}", flush=True)
                 _write_pet_state("idle", self.mode)
 
+    async def watch_consume_loop(self):
+        """Drain observations from the Watcher queue and inject as system
+        messages, then ask Stack to comment only if useful."""
+        while not self.shutdown.is_set():
+            obs = await self.watcher.queue.get()
+            if not obs:
+                continue
+            print(f"\n[observe]\n{obs[:300]}", flush=True)
+            self._write_session({"event": "observation", "text": obs[:2000]})
+            try:
+                await self.send({
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{
+                            "type": "input_text",
+                            "text": (
+                                "[Watcher observation — pane content updated]\n"
+                                f"{obs}\n\n"
+                                "Speak only if there is something specific and useful to say. "
+                                "Silence is fine. If everything looks routine, do NOT respond."
+                            ),
+                        }],
+                    },
+                })
+                await self.send({"type": "response.create"})
+            except Exception as e:
+                print(f"[observe] inject error: {e}", flush=True)
+
     async def run(self):
         await self.connect()
         await asyncio.gather(
-            self.mic_loop(), self.speaker_loop(), self.event_loop(),
+            self.mic_loop(),
+            self.speaker_loop(),
+            self.event_loop(),
+            self.watcher.loop(),
+            self.watch_consume_loop(),
             return_exceptions=False,
         )
 
