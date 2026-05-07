@@ -120,13 +120,14 @@ def read_file(path: str) -> str:
 # Web search — OpenAI Responses API with hosted web_search
 # ============================================================
 
-def web_search(query: str) -> str:
-    """Hosted web search. Returns synthesized answer + source URLs."""
+def _web_search(query: str, model: str, timeout: int) -> str:
+    """Shared backend for both quick and deep search. Calls OpenAI Responses API
+    with hosted web_search and synthesizes an answer + citations."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return "[web_search: OPENAI_API_KEY not set]"
     body = json.dumps({
-        "model": "gpt-5-nano",
+        "model": model,
         "tools": [{"type": "web_search"}],
         "input": query,
     }).encode()
@@ -140,7 +141,7 @@ def web_search(query: str) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=45) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             payload = json.loads(r.read())
     except urllib.error.HTTPError as e:
         return f"[web_search HTTP {e.code}: {e.read()[:300].decode(errors='replace')}]"
@@ -161,6 +162,23 @@ def web_search(query: str) -> str:
     if citations:
         text += "\n\nSources:\n" + "\n".join(f"- {u}" for u in citations[:8])
     return text or json.dumps(payload)[:2000]
+
+
+# Quick search — fast, snappy, best for one-liner lookups.
+QUICK_MODEL = os.environ.get("STACK_QUICK_MODEL", "gpt-5-nano")
+QUICK_TIMEOUT = int(os.environ.get("STACK_QUICK_TIMEOUT", "30"))
+
+# Deep search — slower, better synthesis, for research-heavy questions.
+DEEP_MODEL = os.environ.get("STACK_DEEP_MODEL", "gpt-5-mini")
+DEEP_TIMEOUT = int(os.environ.get("STACK_DEEP_TIMEOUT", "90"))
+
+
+def web_search_quick(query: str) -> str:
+    return _web_search(query, QUICK_MODEL, QUICK_TIMEOUT)
+
+
+def web_search_deep(query: str) -> str:
+    return _web_search(query, DEEP_MODEL, DEEP_TIMEOUT)
 
 
 # ============================================================
@@ -213,10 +231,28 @@ TOOL_SCHEMAS = [
     },
     {
         "type": "function",
-        "name": "web_search",
+        "name": "web_search_quick",
         "description": (
-            "Live web search with citations. Use for current events, library docs, error messages, "
-            "anything you don't have in your training. Takes ~5-10 seconds — say 'one sec' before calling."
+            "FAST web search (~5-15 seconds, gpt-5-nano backend). Use for: simple lookups, "
+            "definitions, one-line answers, current events ('did X happen yet'), package versions, "
+            "error messages, library docs lookups. Say 'one sec' before calling. Pick this by default — "
+            "only escalate to web_search_deep when the question genuinely needs multi-source synthesis."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "web_search_deep",
+        "description": (
+            "DEEP web search (~30-60 seconds, gpt-5-mini backend). Use for: research-heavy questions, "
+            "comparing multiple options ('what's the best X for Y'), 'how does X work under the hood', "
+            "explainers that need to weigh sources, anything Joe explicitly says 'do a deep dive on' or "
+            "'research thoroughly'. Say 'this'll take a minute' before calling. NEVER use this for a "
+            "simple one-liner question — use web_search_quick instead."
         ),
         "parameters": {
             "type": "object",
@@ -272,7 +308,8 @@ TOOL_SCHEMAS = [
 
 DISPATCH = {
     "read_file": lambda args: read_file(args.get("path", "")),
-    "web_search": lambda args: web_search(args.get("query", "")),
+    "web_search_quick": lambda args: web_search_quick(args.get("query", "")),
+    "web_search_deep": lambda args: web_search_deep(args.get("query", "")),
     "tmux_pane": lambda args: tmux_pane(args.get("name", "")),
     "git_status": lambda args: git_status(),
     "git_diff": lambda args: git_diff(args.get("staged", False)),
