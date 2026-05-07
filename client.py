@@ -211,6 +211,11 @@ class Stack:
         self.last_speaker_ms = 0.0
         self.shutdown = asyncio.Event()
         self.gated_chunks = 0
+        # Track whether a response is currently generating. We must NOT call
+        # response.create while one is active — the API errors with
+        # 'conversation_already_has_active_response'. After tool results are
+        # delivered, the active response continues automatically.
+        self.response_active = False
 
         # Transcript persistence (outside the repo, in XDG state)
         sessions_dir = _session_dir()
@@ -432,16 +437,21 @@ class Stack:
                 self._write_session({"event": "tool_call", "name": name, "args": args})
                 result = await asyncio.get_running_loop().run_in_executor(None, dispatch, name, args)
                 self._write_session({"event": "tool_result", "name": name, "preview": result[:400]})
+                # Always submit the result. Do NOT call response.create here —
+                # the active response continues automatically when results land.
+                # If there's no active response (rare), the post-completion path
+                # in response.done will handle starting a fresh one.
                 await self.send({
                     "type": "conversation.item.create",
                     "item": {"type": "function_call_output", "call_id": call_id, "output": result[:50000]},
                 })
-                await self.send({"type": "response.create"})
 
             elif t == "response.created":
+                self.response_active = True
                 _write_pet_state("thinking", self.mode)
 
             elif t == "response.done":
+                self.response_active = False
                 _write_pet_state("idle", self.mode)
 
             elif t == "input_audio_buffer.speech_started":
@@ -486,7 +496,9 @@ class Stack:
                         }],
                     },
                 })
-                await self.send({"type": "response.create"})
+                # Only nudge a new response if one isn't already running
+                if not self.response_active:
+                    await self.send({"type": "response.create"})
             except Exception as e:
                 print(f"[observe] inject error: {e}", flush=True)
 

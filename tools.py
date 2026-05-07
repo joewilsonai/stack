@@ -191,7 +191,25 @@ def _not_implemented(name: str) -> str:
 
 
 def tmux_pane(name: str = "") -> str:
-    return _not_implemented("tmux_pane")
+    """Capture recent output from a tmux/cmux pane. Defaults to the pane Stack
+    is watching (STACK_WATCH_PANE) — usually the developer's working pane."""
+    target = name or os.environ.get("STACK_WATCH_PANE", "")
+    if not target:
+        return "[tmux_pane: no pane specified and STACK_WATCH_PANE not set — Stack was likely launched without a watch target]"
+    try:
+        # Local import to avoid circulars at module load
+        from watcher import capture_pane
+    except ImportError:
+        return "[tmux_pane: watcher module not available]"
+    out = capture_pane(target)
+    if out is None:
+        return f"[tmux_pane: failed to capture {target}]"
+    if not out.strip():
+        return f"[tmux_pane: {target} is empty]"
+    # Cap output at 8000 chars
+    if len(out) > 8000:
+        out = "[truncated to last 8000 chars]\n" + out[-8000:]
+    return f"=== {target} ===\n{out}"
 
 
 def git_status() -> str:
@@ -263,10 +281,21 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "name": "tmux_pane",
-        "description": "Read recent output from a named tmux pane. (v0 stub — Phase 4)",
+        "description": (
+            "Read recent terminal output from the developer's working pane. "
+            "Call this when the user asks 'what do you see' / 'check my terminal' / "
+            "'didn't you see X' or whenever you need to know what they're looking at. "
+            "By default reads the pane Stack is watching — pass no arguments. "
+            "Only pass `name` if you specifically need to read a different pane."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"name": {"type": "string", "description": "Pane name or id"}},
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Optional pane ref/UUID. Leave empty to read the watched pane.",
+                },
+            },
         },
     },
     {
