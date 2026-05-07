@@ -194,12 +194,21 @@ class Watcher:
     """
 
     def __init__(self, target_ref: Optional[str] = None):
+        # target_ref is now a "scope to one pane" override. If unset, the
+        # watcher follows ALL non-self panes and auto-discovers new ones
+        # as they appear (e.g. when the developer splits a new test pane).
         self.target_ref = target_ref or os.environ.get("STACK_WATCH_PANE") or None
+        # If a single STACK_WATCH_FOCUS env var is set explicitly, lock to that.
+        # Otherwise treat STACK_WATCH_PANE as a hint and follow all panes.
+        self.lock_to_target = os.environ.get("STACK_WATCH_LOCK", "0") == "1"
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.last_capture: dict[str, str] = {}
-        self.last_emit_ms = 0.0
+        # Per-pane throttle so multi-pane workspaces don't suppress events
+        # from one pane while another is busy.
+        self.last_emit_ms_per_pane: dict[str, float] = {}
         self.disabled = WATCH_DISABLED or (not _is_cmux() and not _is_tmux())
         self._panes_cached: list[PaneInfo] = []
+        self._known_refs: set[str] = set()
 
     def status(self) -> str:
         if self.disabled:
@@ -208,18 +217,24 @@ class Watcher:
         return f"[watcher] backend={backend} poll={POLL_SECONDS}s min_lines={MIN_NEW_LINES} throttle={THROTTLE_SECONDS}s"
 
     def _select_panes(self) -> list[PaneInfo]:
-        if self.target_ref:
-            return [p for p in list_panes() if p.ref == self.target_ref]
-        return [p for p in list_panes() if not p.is_self]
+        all_other = [p for p in list_panes() if not p.is_self]
+        if self.lock_to_target and self.target_ref:
+            # Strict single-pane focus
+            matches = [p for p in all_other if p.ref == self.target_ref]
+            return matches or all_other  # fall back if the locked pane vanished
+        return all_other
 
     async def loop(self):
         if self.disabled:
             return
-        # Prime: take an initial capture so we don't fire on existing content
+        # Prime initial captures so we don't fire on existing content
         for p in self._select_panes():
             cap = capture_pane(p.ref)
             if cap is not None:
                 self.last_capture[p.ref] = cap
+                self._known_refs.add(p.ref)
+        if self._known_refs:
+            print(f"[watcher] watching {len(self._known_refs)} pane(s): {', '.join(sorted(self._known_refs))}", flush=True)
         # Poll loop
         while True:
             await asyncio.sleep(POLL_SECONDS)
@@ -230,7 +245,30 @@ class Watcher:
 
     async def _tick(self):
         panes = self._select_panes()
+        current_refs = {p.ref for p in panes}
+
+        # Auto-discover newly-appeared panes — prime them so we don't fire
+        # on their pre-existing content the first time we see them
+        new_refs = current_refs - self._known_refs
         for p in panes:
+            if p.ref in new_refs:
+                cap = capture_pane(p.ref)
+                if cap is not None:
+                    self.last_capture[p.ref] = cap
+                self._known_refs.add(p.ref)
+                print(f"[watcher] now watching new pane {p.ref}{f' \"{p.title}\"' if p.title else ''}", flush=True)
+
+        # Drop tracking for panes that closed
+        for stale_ref in self._known_refs - current_refs:
+            self.last_capture.pop(stale_ref, None)
+            self.last_emit_ms_per_pane.pop(stale_ref, None)
+            self._known_refs.discard(stale_ref)
+            print(f"[watcher] pane {stale_ref} closed", flush=True)
+
+        # Diff loop — per-pane throttle so multi-pane work doesn't get suppressed
+        for p in panes:
+            if p.ref in new_refs:
+                continue  # just primed; skip first diff
             cap = capture_pane(p.ref)
             if cap is None:
                 continue
@@ -239,12 +277,11 @@ class Watcher:
             new_lines = _meaningful_diff(prev, cap)
             if len(new_lines) < MIN_NEW_LINES:
                 continue
-            # Throttle gate
             now_ms = time.monotonic() * 1000
-            if (now_ms - self.last_emit_ms) < THROTTLE_SECONDS * 1000:
+            last_emit = self.last_emit_ms_per_pane.get(p.ref, 0.0)
+            if (now_ms - last_emit) < THROTTLE_SECONDS * 1000:
                 continue
-            self.last_emit_ms = now_ms
-            # Cap the observation size
+            self.last_emit_ms_per_pane[p.ref] = now_ms
             preview = "\n".join(new_lines[-40:])
             obs = (
                 f"PANE UPDATE ({p.ref}{f' \"{p.title}\"' if p.title else ''}):\n"
