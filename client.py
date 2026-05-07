@@ -46,6 +46,13 @@ OUTPUT_BLOCKSIZE = 1200
 # model's voice. Eliminates the VAD-triggered self-interruption loop on speakers.
 SPEAKER_TAIL_MS = 280
 
+# Volume-threshold barge-in: when the gate is active, a mic chunk with peak
+# int16 amplitude above this threshold is allowed through anyway, treating it
+# as a deliberate interrupt. Tune via STACK_INTERRUPT_THRESHOLD env var.
+# Lower = easier to interrupt but more false-trips from speaker bleed.
+# Higher = need to talk louder. Default 3000 covers most laptop-speaker setups.
+INTERRUPT_THRESHOLD = int(os.environ.get("STACK_INTERRUPT_THRESHOLD", "3000"))
+
 # Persona loaded from persona.md so it can be edited without touching code.
 PERSONA_PATH = Path(__file__).parent / "persona.md"
 SYSTEM_PROMPT = PERSONA_PATH.read_text() if PERSONA_PATH.exists() else "You are Stack."
@@ -150,13 +157,27 @@ class Stack:
         try:
             while not self.shutdown.is_set():
                 chunk = await q.get()
-                # Half-duplex gate: drop mic chunks while speakers are active
+                # Half-duplex gate: drop mic chunks while speakers are active,
+                # UNLESS the chunk is loud enough to be a deliberate interrupt
+                # (volume-threshold barge-in).
                 now_ms = time.monotonic() * 1000
                 with self.audio_lock:
                     speaker_active = len(self.audio_buf) > 0
-                if speaker_active or (now_ms - self.last_speaker_ms) < SPEAKER_TAIL_MS:
-                    self.gated_chunks += 1
-                    continue
+                gated = speaker_active or (now_ms - self.last_speaker_ms) < SPEAKER_TAIL_MS
+
+                if gated:
+                    samples = np.frombuffer(chunk, dtype=np.int16)
+                    peak = int(np.abs(samples).max()) if len(samples) else 0
+                    if peak < INTERRUPT_THRESHOLD:
+                        self.gated_chunks += 1
+                        continue
+                    # Loud enough — break through the gate. Cut local audio
+                    # immediately so Stack stops talking on your end, and let
+                    # the server's interrupt_response handle the API side.
+                    print(f"\n[interrupt] peak={peak} (threshold {INTERRUPT_THRESHOLD})", flush=True)
+                    with self.audio_lock:
+                        self.audio_buf.clear()
+
                 await self.send({
                     "type": "input_audio_buffer.append",
                     "audio": base64.b64encode(chunk).decode(),
