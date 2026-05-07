@@ -280,11 +280,26 @@ class Stack:
 
     async def connect(self):
         headers = [("Authorization", f"Bearer {API_KEY}")]
+        # ping_timeout=60 gives slack during long tool calls (web_search ~15-45s).
+        # Default 20s drops the WS the moment a tool round-trip overlaps a ping.
+        ws_kwargs = dict(
+            max_size=16 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=60,
+            close_timeout=10,
+        )
         try:
-            self.ws = await websockets.connect(URL, additional_headers=headers, max_size=16 * 1024 * 1024)
+            self.ws = await websockets.connect(URL, additional_headers=headers, **ws_kwargs)
         except TypeError:
-            self.ws = await websockets.connect(URL, extra_headers=headers, max_size=16 * 1024 * 1024)
+            self.ws = await websockets.connect(URL, extra_headers=headers, **ws_kwargs)
         print(f"[connected] {MODEL} voice={VOICE}", flush=True)
+        # Reset per-connection transient state on reconnect
+        self.response_active = False
+        self.response_active_since = None
+        self.had_tool_calls_in_response = False
+        with self.audio_lock:
+            self.audio_buf.clear()
+        self.assistant_buf = []
 
         await self.send({
             "type": "session.update",
@@ -689,10 +704,27 @@ async def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, handler)
 
+    max_reconnects = int(os.environ.get("STACK_MAX_RECONNECTS", "5"))
+    backoff = 1.0
+    attempt = 0
     try:
-        await s.run()
-    except websockets.ConnectionClosed as e:
-        print(f"[ws closed] {e}", flush=True)
+        while not s.shutdown.is_set():
+            try:
+                await s.run()
+                break  # clean exit (e.g., shutdown event set)
+            except websockets.ConnectionClosed as e:
+                attempt += 1
+                if attempt > max_reconnects:
+                    print(f"[fatal] {max_reconnects} reconnect attempts failed — giving up", file=sys.stderr, flush=True)
+                    break
+                print(f"\n[ws closed] {e} — reconnecting in {backoff:.0f}s ({attempt}/{max_reconnects})", flush=True)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+                # Audio sounddevice streams are torn down by the loop's
+                # finally blocks; run() will recreate them next iteration.
+                _write_pet_state("idle", stack_state.get_mode())
+            except KeyboardInterrupt:
+                break
     except KeyboardInterrupt:
         pass
     finally:
