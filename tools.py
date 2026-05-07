@@ -55,8 +55,32 @@ _CONFIG = _load_deny_config()
 DENIED_ROOTS = [_expand(p).resolve() for p in _CONFIG.get("denied_roots", [])]
 DENIED_EXTS = set(_CONFIG.get("denied_extensions", []))
 
-CWD_ROOT = Path.cwd().resolve()  # frozen at startup
-ALLOWED_FILES: set[Path] = set()  # exact-match allowed files (populated below)
+
+def _detect_project_root() -> Path:
+    """Find the project root by walking up from cwd looking for common markers
+    (.git, pyproject.toml, package.json, Cargo.toml, go.mod). Falls back to cwd.
+    STACK_PROJECT_ROOT env var overrides detection if set."""
+    override = os.environ.get("STACK_PROJECT_ROOT", "").strip()
+    if override:
+        p = Path(override).expanduser().resolve()
+        if p.exists():
+            return p
+    cwd = Path.cwd().resolve()
+    current = cwd
+    home = Path.home().resolve()
+    markers = (".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "Gemfile")
+    while True:
+        for m in markers:
+            if (current / m).exists():
+                return current
+        if current == home or current == current.parent:
+            break
+        current = current.parent
+    return cwd
+
+
+CWD_ROOT = _detect_project_root()
+ALLOWED_FILES: set[Path] = set()
 
 
 def _path_allowed(path: Path) -> tuple[bool, str]:

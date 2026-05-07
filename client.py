@@ -31,8 +31,13 @@ if not API_KEY:
     sys.exit(1)
 
 sys.path.insert(0, str(Path(__file__).parent))
-from tools import TOOL_SCHEMAS, dispatch  # noqa: E402
+from tools import TOOL_SCHEMAS, dispatch, CWD_ROOT  # noqa: E402
 from watcher import Watcher  # noqa: E402
+
+# Surface the detected project root so it's obvious what Stack can see
+print(f"[scope] project root: {CWD_ROOT}", flush=True)
+if Path.cwd().resolve() != CWD_ROOT:
+    print(f"        (auto-detected from cwd {Path.cwd().resolve()})", flush=True)
 
 MODEL = os.environ.get("STACK_MODEL", "gpt-realtime-2")
 VOICE = os.environ.get("STACK_VOICE", "cedar")
