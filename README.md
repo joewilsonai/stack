@@ -1,21 +1,29 @@
-# Stack
+<div align="center">
 
-> *The voice in your stack.*
+# 🎙️ Stack
 
-Voice pair programmer for the terminal. Built on OpenAI's [`gpt-realtime-2`](https://openai.com/index/advancing-voice-intelligence-with-new-models-in-the-api/) (released May 7, 2026). Lives in a tmux/cmux pane, watches your other panes, talks back.
+**The voice in your stack.**
 
-**Status:** v0 scaffold. Not yet feature-complete.
+Voice pair programmer for the terminal. Built on OpenAI's [`gpt-realtime-2`](https://openai.com/index/advancing-voice-intelligence-with-new-models-in-the-api/). Lives in a tmux/cmux pane, watches your other panes, talks back.
+
+[![Status](https://img.shields.io/badge/Status-v0_scaffold-yellow)]()
+[![Model](https://img.shields.io/badge/Model-gpt--realtime--2-000000?logo=openai)](https://openai.com)
+[![License](https://img.shields.io/badge/License-MIT-blue)](#license)
+
+</div>
+
+---
 
 ## What it is
 
-Cursor and Copilot are silent text completion. Stack is *ambient voice presence*. It lives next to your editor in a separate terminal pane, watches commands run in your shell pane, and speaks up when there's something worth saying.
+Cursor and Copilot are silent text completion. **Stack is ambient voice presence.** It lives next to your editor in a separate terminal pane, watches commands run in your shell pane, and speaks up when there's something worth saying.
 
-| | Cursor / Copilot | Stack |
+|  | Cursor / Copilot | Stack |
 |---|---|---|
-| modality | silent text completion | ambient voice |
-| invocation | reactive (you type) | proactive (watches panes) |
-| personality | none | opinionated character |
-| location | inside the IDE | terminal-native, IDE-agnostic |
+| **Modality** | silent text completion | ambient voice |
+| **Invocation** | reactive (you type) | proactive (watches panes) |
+| **Personality** | none | opinionated character |
+| **Location** | inside the IDE | terminal-native, IDE-agnostic |
 
 ## How it works
 
@@ -28,76 +36,61 @@ tmux session
 
 The Stack pane runs a Python client that:
 
-1. Connects to OpenAI's GA Realtime API (`wss://api.openai.com/v1/realtime?model=gpt-realtime-2`)
-2. Captures your microphone (24kHz PCM16) and streams to the server
-3. Plays the model's voice replies back through your speakers
-4. Polls neighboring tmux panes for new content and feeds observations into the conversation
-5. Exposes a tool layer (`read_file`, `git_status`, `git_diff`, `web_search`, `tmux_pane`, `run_readonly`) the model can call
+1. **Connects** to OpenAI's GA Realtime API (`wss://api.openai.com/v1/realtime?model=gpt-realtime-2`)
+2. **Captures your mic** (24kHz PCM16) and streams to the server
+3. **Plays voice replies** back through your speakers
+4. **Polls neighboring tmux panes** for new content and feeds observations into the conversation
+5. **Exposes a tool layer** (`read_file`, `git_status`, `git_diff`, `web_search`, `tmux_pane`, `run_readonly`) the model can call
 
 ## Modes
 
-- **quiet** — speak only when addressed
-- **pair** *(default)* — interject on meaningful events (test failures, build breaks, unusual git status)
-- **roast** — active push-back on rabbit holes
+- 🔇 **quiet** — speak only when addressed
+- 🤝 **pair** *(default)* — interject on meaningful events (test failures, build breaks, unusual git status)
+- 🔥 **roast** — active push-back on rabbit holes
 
 Switch by saying *"go quiet"* / *"switch to pair"* / *"roast me"*.
 
 ## Install
 
 ```bash
-git clone https://github.com/PoliTwit1984/stack.git ~/stack
+git clone https://github.com/joewilsonai/stack ~/stack
 cd ~/stack
 ./install.sh         # creates venv, installs deps, writes ~/.config/stack/deny.json
-                     # also symlinks 'stack' to ~/.local/bin (or /usr/local/bin)
 ```
 
-Add your OpenAI key:
+Set your OpenAI key:
 
 ```bash
-echo "OPENAI_API_KEY=sk-..." > ~/stack/.env
+echo "OPENAI_API_KEY=sk-..." >> ~/.config/stack/env
 ```
 
-## Run
-
-From inside any project directory you're working in (in cmux or tmux):
+Open a tmux session and run:
 
 ```bash
-stack
+stack pair
 ```
 
-That's it. Stack splits a new pane to the right, runs itself there, and starts watching the pane you launched it from. Keep coding in your original pane; Stack will speak up when it sees something worth commenting on.
+## Configuration
 
-Other invocations:
+Stack reads `~/.config/stack/config.toml`:
 
-```bash
-stack here          # run in the current pane (no auto-split)
-STACK_SPLIT_DIR=down stack    # split downward instead of right
-STACK_PET=0 stack             # disable the floating pet
-STACK_WATCH=0 stack           # disable the pane watcher
+```toml
+[mic]
+device = "default"
+sample_rate = 24000
+
+[panes]
+watch = ["shell", "editor"]
+poll_interval_ms = 500
+
+[deny]
+# commands stack won't run even via run_readonly
+patterns = ["rm -rf", "git push --force", "sudo"]
 ```
-
-## Privacy & file access
-
-Stack reads files. By design, this is heavily constrained:
-
-- **Allowed by default:** the directory you launch it from (your project repo).
-- **Configurable extra reads:** edit `~/.config/stack/deny.json` to extend the deny list.
-- **Hard-coded denies:** any path under your `~/.ssh`, `~/.aws`, `~/.config/gh`, etc. (default deny list shipped in `deny.json.example`).
-- **Sessions stored outside the repo:** all transcripts go to `~/.local/state/stack/sessions/` so they're never accidentally committed.
-
-If `~/.config/stack/deny.json` is missing or invalid, Stack refuses to start (fail-closed).
 
 ## Status
 
-- [x] gpt-realtime-2 GA voice client
-- [ ] tmux pane watcher
-- [ ] Proactive interjection
-- [ ] Mode toggles
-- [ ] Tool layer (`tmux_pane`, `run_readonly`, `git_*`)
-- [ ] Custom persona
-- [ ] Install script
-
-See open issues for current work.
+⚠️ **v0 scaffold — not feature-complete.** The voice loop and pane-watching are working; tool dispatching, deny-list enforcement, and IDE integrations are in progress. Built in public — follow along on [Twitter](https://twitter.com/joewilsonai).
 
 ## License
 
